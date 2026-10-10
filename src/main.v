@@ -802,13 +802,8 @@ fn (mut g Game) update_menu(dt f32) {
 	h := f32(ffi.win_h())
 	mx := f32(ffi.mouse_x())
 	my := f32(ffi.mouse_y())
-	mut i := 0
-	for i < n {
-		r := menu_item_rect(w, h, g.menu_screen, i)
-		if mx >= r[0] && mx <= r[0] + r[2] && my >= r[1] && my <= r[1] + r[3] {
-			g.menu_sel = i
-		}
-		i++
+	if hover := menu_row_at(w, h, g.menu_screen, n, mx, my) {
+		g.menu_sel = hover
 	}
 
 	if key_pressed(sc_up) || key_pressed(sc_w) {
@@ -836,10 +831,35 @@ fn (mut g Game) update_menu(dt f32) {
 
 	if key_pressed(sc_enter) || key_pressed(sc_space) {
 		g.activate_menu_item()
+		return
 	}
-	if ffi.button_pressed(0) {
-		g.activate_menu_item()
+	// Left click activates the row under the cursor, and only that row: a
+	// click in the gap between rows, or on the panel background, must do
+	// nothing. Note the button index: 1 is left, because pump() shifts
+	// SDL's mouse mask by one.
+	if ffi.button_pressed(1) {
+		if hit := menu_row_at(w, h, g.menu_screen, n, mx, my) {
+			g.menu_sel = hit
+			g.activate_menu_item()
+		}
 	}
+}
+
+// Index of the menu row under the cursor, or none when the point misses
+// them all. Shared by hover and click so the two can never disagree. Note
+// the miss case must be none rather than -1: as an ?int, some(-1) is a
+// perfectly good value and a truthy one, which would select a row that
+// does not exist.
+fn menu_row_at(w f32, h f32, screen MenuScreen, n int, mx f32, my f32) ?int {
+	mut i := 0
+	for i < n {
+		r := menu_item_rect(w, h, screen, i)
+		if mx >= r[0] && mx <= r[0] + r[2] && my >= r[1] && my <= r[1] + r[3] {
+			return i
+		}
+		i++
+	}
+	return none
 }
 
 fn (mut g Game) activate_menu_item() {
@@ -1679,6 +1699,40 @@ fn (mut g Game) selftest() {
 	if !ok {
 		failures++
 	}
+	// 18. A left click must activate the menu row it lands on. The button
+	// index matters: pump() shifts SDL's mask, so left is 1, not 0. A
+	// click test that used the wrong index still passes on the keyboard
+	// path, so it has to drive the button explicitly.
+	g.paused = true
+	g.menu_screen = .main
+	g.menu_sel = 0
+	w := f32(ffi.win_w())
+	h := f32(ffi.win_h())
+	r := menu_item_rect(w, h, .main, 1) // SETTINGS
+	ffi.set_mouse_at(i32(r[0] + r[2] / 2.0), i32(r[1] + r[3] / 2.0))
+	ffi.inject_button(1, true)
+	g.handle_input(f32(1.0 / 60.0))
+	ffi.inject_button(1, false)
+	g.handle_input(f32(1.0 / 60.0))
+	ok = g.menu_screen == .settings
+	println('test menu clk: ${ok} screen=${int(g.menu_screen)} (clicked SETTINGS row)')
+	if !ok {
+		failures++
+	}
+	// ... and a click on empty panel space must do nothing at all.
+	g.menu_screen = .main
+	g.menu_sel = 0
+	ffi.set_mouse_at(i32(w / 2.0), i32(h - f32(20.0)))
+	ffi.inject_button(1, true)
+	g.handle_input(f32(1.0 / 60.0))
+	ffi.inject_button(1, false)
+	g.handle_input(f32(1.0 / 60.0))
+	ok = g.menu_screen == .main && g.paused
+	println('test clk miss: ${ok} screen=${int(g.menu_screen)} paused=${g.paused} (clicked empty space)')
+	if !ok {
+		failures++
+	}
+
 	g.paused = false
 	g.apply_tune(orig)
 	g.save_settings()
