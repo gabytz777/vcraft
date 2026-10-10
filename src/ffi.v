@@ -42,6 +42,7 @@ fn C.SDL_PollEvent(ev voidptr) i32
 fn C.SDL_GetKeyboardState(numkeys voidptr) &u8
 fn C.SDL_GetRelativeMouseState(x &i32, y &i32) u32
 fn C.SDL_GetScancodeFromName(name &char) i32
+fn C.SDL_GetMouseState(x &i32, y &i32) u32
 fn C.SDL_GetError() &char
 
 // ------------------------------------------------------------------
@@ -86,6 +87,7 @@ fn C.glPixelStorei(pname u32, param i32)
 fn C.glGenTextures(n i32, tex &u32)
 fn C.glBindTexture(target u32, tex u32)
 fn C.glTexImage3D(target u32, level i32, internal_fmt i32, w i32, h i32, depth i32, border i32, fmt u32, typ u32, pixels voidptr)
+fn C.glTexImage2D(target u32, level i32, internal_fmt i32, w i32, h i32, border i32, fmt u32, typ u32, pixels voidptr)
 fn C.glTexParameteri(target u32, pname u32, param i32)
 fn C.glActiveTexture(tex u32)
 fn C.glGetString(name u32) &char
@@ -122,7 +124,13 @@ __global (
 	g_ui_vao       u32
 	g_ui_vbo       u32
 	g_white_tex    u32
+	g_text_prog    u32
+	g_text_vao     u32
+	g_text_vbo     u32
+	g_font_tex     u32
 	u_ui_proj      i32 = -1
+	u_text_proj    i32 = -1
+	u_text_font    i32 = -1
 	u_mvp          i32 = -1
 	u_view         i32 = -1
 	u_fog_color    i32 = -1
@@ -143,7 +151,10 @@ __global (
 	g_ib_n         i32
 	g_mouse_dx     i32
 	g_mouse_dy     i32
+	g_mouse_x      i32
+	g_mouse_y      i32
 	g_mouse_btns   u32
+	g_mouse_prev   u32
 	g_close        i32
 	g_resized      i32
 )
@@ -165,7 +176,9 @@ const c_gl_blend = u32(0x0BE2)
 const c_gl_src_alpha = u32(0x0302)
 const c_gl_one_minus_src_alpha = u32(0x0303)
 const c_gl_texture_2d_array = u32(0x8C1A)
+const c_gl_texture_2d = u32(0x0DE1)
 const c_gl_texture0 = u32(0x84C0)
+const c_gl_texture1 = u32(0x84C1)
 const c_gl_rgba = u32(0x1908)
 const c_gl_rgba8 = 0x8058
 const c_gl_unsigned_byte = u32(0x1401)
@@ -260,6 +273,39 @@ fn ui_fs_src() string {
 	].join('\n') + '\n'
 }
 
+// Text draws sample a single 2D font atlas and take their alpha from it, so
+// the same white glyph grid serves any colour.
+fn text_vs_src() string {
+	return [
+		'#version 330 core',
+		'layout(location=0) in vec2 a_pos;',
+		'layout(location=1) in vec2 a_uv;',
+		'layout(location=2) in vec4 a_col;',
+		'uniform mat4 u_proj;',
+		'out vec2 v_uv;',
+		'out vec4 v_col;',
+		'void main() {',
+		'  v_uv = a_uv;',
+		'  v_col = a_col;',
+		'  gl_Position = u_proj * vec4(a_pos, 0.0, 1.0);',
+		'}',
+	].join('\n') + '\n'
+}
+
+fn text_fs_src() string {
+	return [
+		'#version 330 core',
+		'in vec2 v_uv;',
+		'in vec4 v_col;',
+		'uniform sampler2D u_font;',
+		'out vec4 out_color;',
+		'void main() {',
+		'  float a = texture(u_font, v_uv).a;',
+		'  out_color = vec4(v_col.rgb, v_col.a * a);',
+		'}',
+	].join('\n') + '\n'
+}
+
 fn compile_shader(typ u32, src string, tag string) u32 {
 	sh := unsafe { C.glCreateShader(typ) }
 	cs := src.str
@@ -338,6 +384,45 @@ fn build_ui_program() int {
 		C.glVertexAttribPointer(0, 2, c_gl_float, u8(0), 24, voidptr(0))
 		C.glEnableVertexAttribArray(1)
 		C.glVertexAttribPointer(1, 4, c_gl_float, u8(0), 24, voidptr(8))
+	}
+	return 1
+}
+
+fn build_text_program() int {
+	vs := compile_shader(c_gl_vertex_shader, text_vs_src(), 'text-vertex')
+	fs := compile_shader(c_gl_fragment_shader, text_fs_src(), 'text-fragment')
+	g_text_prog = unsafe { C.glCreateProgram() }
+	unsafe {
+		C.glAttachShader(g_text_prog, vs)
+		C.glAttachShader(g_text_prog, fs)
+		C.glLinkProgram(g_text_prog)
+	}
+	mut ok := i32(0)
+	unsafe { C.glGetProgramiv(g_text_prog, c_gl_link_status, &ok) }
+	if ok == 0 {
+		mut log := [2048]u8{}
+		unsafe { C.glGetProgramInfoLog(g_text_prog, 2048, voidptr(0), &log[0]) }
+		eprintln('[vshim] text link failed: ${log.bytestr()}')
+		return 0
+	}
+	unsafe {
+		C.glDeleteShader(vs)
+		C.glDeleteShader(fs)
+	}
+	u_text_proj = unsafe { C.glGetUniformLocation(g_text_prog, c'u_proj') }
+	u_text_font = unsafe { C.glGetUniformLocation(g_text_prog, c'u_font') }
+	unsafe { C.glGenVertexArrays(1, &g_text_vao) }
+	unsafe { C.glBindVertexArray(g_text_vao) }
+	unsafe { C.glGenBuffers(1, &g_text_vbo) }
+	unsafe { C.glBindBuffer(c_gl_array_buffer, g_text_vbo) }
+	unsafe {
+		// pos(2) uv(2) colour(4) = 8 floats per vertex
+		C.glEnableVertexAttribArray(0)
+		C.glVertexAttribPointer(0, 2, c_gl_float, u8(0), 32, voidptr(0))
+		C.glEnableVertexAttribArray(1)
+		C.glVertexAttribPointer(1, 2, c_gl_float, u8(0), 32, voidptr(8))
+		C.glEnableVertexAttribArray(2)
+		C.glVertexAttribPointer(2, 4, c_gl_float, u8(0), 32, voidptr(16))
 	}
 	return 1
 }
@@ -429,6 +514,9 @@ pub fn init(mode int, title &char, w int, h int) int {
 	if build_ui_program() == 0 {
 		return 0
 	}
+	if build_text_program() == 0 {
+		return 0
+	}
 
 	unsafe {
 		C.glGenVertexArrays(1, &g_vao)
@@ -481,6 +569,24 @@ pub fn make_texture(data &u8, size int, layers int) int {
 		C.glTexParameteri(c_gl_texture_2d_array, c_gl_texture_wrap_s, c_gl_clamp_to_edge)
 		C.glTexParameteri(c_gl_texture_2d_array, c_gl_texture_wrap_t, c_gl_clamp_to_edge)
 	}
+	return int(t)
+}
+
+// A single 2D RGBA texture holding the procedural font atlas. The handle is
+// kept in g_font_tex so the text program can bind it on texture unit 1.
+pub fn make_font_texture(data &u8, w int, h int) int {
+	mut t := u32(0)
+	unsafe {
+		C.glGenTextures(1, &t)
+		C.glBindTexture(c_gl_texture_2d, t)
+		C.glTexImage2D(c_gl_texture_2d, 0, c_gl_rgba8, w, h, 0, c_gl_rgba, c_gl_unsigned_byte, data)
+		C.glTexParameteri(c_gl_texture_2d, c_gl_texture_min_filter, c_gl_nearest)
+		C.glTexParameteri(c_gl_texture_2d, c_gl_texture_mag_filter, c_gl_nearest)
+		C.glTexParameteri(c_gl_texture_2d, c_gl_texture_wrap_s, c_gl_clamp_to_edge)
+		C.glTexParameteri(c_gl_texture_2d, c_gl_texture_wrap_t, c_gl_clamp_to_edge)
+		C.glBindTexture(c_gl_texture_2d, u32(0))
+	}
+	g_font_tex = t
 	return int(t)
 }
 
@@ -578,6 +684,31 @@ pub fn draw_colors(verts &f32, count int, proj &f32) {
 		if count > 0 {
 			C.glDrawArrays(c_gl_triangles, 0, count)
 		}
+	}
+}
+
+// verts: 8 floats per vertex (x, y, u, v, r, g, b, a), already in draw order.
+pub fn text_begin(proj &f32) {
+	unsafe {
+		C.glUseProgram(g_text_prog)
+		C.glUniformMatrix4fv(u_text_proj, 1, u8(0), proj)
+		C.glActiveTexture(c_gl_texture1)
+		C.glBindTexture(c_gl_texture_2d, g_font_tex)
+		C.glActiveTexture(c_gl_texture0)
+		C.glUniform1i(u_text_font, 1)
+		C.glBindVertexArray(g_text_vao)
+	}
+}
+
+pub fn draw_text(verts &f32, count int) {
+	unsafe {
+		C.glBindVertexArray(g_text_vao)
+		C.glBindBuffer(c_gl_array_buffer, g_text_vbo)
+		C.glBufferData(c_gl_array_buffer, isize(count) * 32, verts, c_gl_dynamic_draw)
+		if count > 0 {
+			C.glDrawArrays(c_gl_triangles, 0, count)
+		}
+		C.glBindVertexArray(g_vao)
 	}
 }
 
@@ -744,6 +875,7 @@ pub fn pump() {
 		g_ks_prev[i] = g_ks[i]
 		i++
 	}
+	g_mouse_prev = g_mouse_btns
 
 	if g_win != voidptr(0) {
 		unsafe { C.SDL_PumpEvents() }
@@ -762,6 +894,13 @@ pub fn pump() {
 		g_mouse_dy += dy
 		// SDL button bit -> our bit: left=0->1, middle=1->2, right=2->3.
 		g_mouse_btns = mask << 1
+		// Absolute cursor position, for the pause menu. SDL's origin is
+		// top-left, which matches the HUD's ortho projection.
+		mut mx := i32(0)
+		mut my := i32(0)
+		unsafe { C.SDL_GetMouseState(&mx, &my) }
+		g_mouse_x = mx
+		g_mouse_y = my
 	}
 
 	// Synthetic keys, applied in order so a down+up pair still lands cleanly.
@@ -870,6 +1009,34 @@ pub fn keys() u64 {
 
 pub fn buttons() u64 {
 	return u64(g_mouse_btns)
+}
+
+// Rising edge of a mouse button this frame (left=0, middle=1, right=2).
+pub fn button_pressed(i int) bool {
+	if i < 0 || i >= 32 {
+		return false
+	}
+	bit := u32(1) << u32(i)
+	return (g_mouse_btns & bit) != 0 && (g_mouse_prev & bit) == 0
+}
+
+pub fn mouse_x() int {
+	return int(g_mouse_x)
+}
+
+pub fn mouse_y() int {
+	return int(g_mouse_y)
+}
+
+// Free the cursor for the pause menu, and re-grab it for mouse-look.
+pub fn set_mouse_relative(on bool) {
+	if g_win != voidptr(0) {
+		unsafe { C.SDL_SetRelativeMouseMode(if on { 1 } else { 0 }) }
+	}
+}
+
+pub fn request_close() {
+	g_close = 1
 }
 
 pub fn mouse_dx() int {

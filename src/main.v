@@ -3,42 +3,65 @@ module main
 import os
 import time
 import math
-
 import ffi
 import vm
 import blocks
 import texture
+import font
+import audio
 import world
 import mesher
 import raycast
 import player as player_mod
 
-const (
-	render_distance = 6 // in chunks
-	window_w = 1280
-	window_h = 720
-	fov_deg = 70.0
-	near_plane = 0.05
-	far_plane = 400.0
-	world_seed = 1337
-)
+const window_w = 1280
+const window_h = 720
+const near_plane = 0.05
+const far_plane = 400.0
+const world_seed = 1337
+
+// Cheapest render distance the settings menu allows, and the bounds for the
+// other tunables. They are read back from disk on startup.
+//
+// The upper bound is deliberately conservative: every meshed chunk is drawn
+// in one batch, so the vertex buffer grows with the square of the radius.
+// Anything past 8 wedges the GL driver on a weak iGPU (measured on the
+// Radeon 610M development machine, where 10 aborts Mesa mid-frame).
+const min_rd = 2
+const max_rd = 8
+const min_fov = f32(40.0)
+const max_fov = f32(110.0)
+
+// Pause menu entries.
+const menu_main_items = 3
+const menu_settings_items = 6
+
+enum MenuScreen {
+	none
+	main
+	settings
+}
 
 // SDL scancodes (SDL_SCANCODE_*). Verified against SDL_GetScancodeFromName
 // by the self-test: getting one of these wrong binds a key to an unrelated
 // action, which reads as "the controls are broken".
-const (
-	sc_w = 26
-	sc_a = 4
-	sc_s = 22
-	sc_d = 7
-	sc_space = 44
-	sc_shift_l = 225
-	sc_ctrl_l = 224
-	sc_f = 9
-	sc_1 = 30
-	sc_lbracket = 47
-	sc_rbracket = 48
-)
+const sc_w = 26
+const sc_a = 4
+const sc_s = 22
+const sc_d = 7
+const sc_space = 44
+const sc_shift_l = 225
+const sc_ctrl_l = 224
+const sc_f = 9
+const sc_1 = 30
+const sc_lbracket = 47
+const sc_rbracket = 48
+const sc_escape = 41
+const sc_enter = 40
+const sc_up = 82
+const sc_down = 81
+const sc_left = 80
+const sc_right = 79
 
 struct ChunkMesh {
 mut:
@@ -50,14 +73,14 @@ mut:
 
 struct Game {
 mut:
-	w       world.World
-	meshes  map[i64]ChunkMesh
-	p       player_mod.Player
+	w        world.World
+	meshes   map[i64]ChunkMesh
+	p        player_mod.Player
 	selected int
-	time    f64
-	fps     f64
+	time     f64
+	fps      f64
 	last_fps f64
-	frame   int
+	frame    int
 	// camera
 	pos  vm.Vec3
 	dir  vm.Vec3
@@ -76,12 +99,26 @@ mut:
 	break_progress f32
 	break_frac     f32
 	place_cd       f32
-	gen_count int
-	dbg_fw f32
-	dbg_st f32
+	gen_count      int
+	dbg_fw         f32
+	dbg_st         f32
 	// scratch buffers rebuilt each frame
-	quad_buffer   []f32
-	water_buffer  []f32
+	quad_buffer  []f32
+	water_buffer []f32
+	// settings, persisted to ~/.config/vcraft/settings.cfg
+	rd     int = 6
+	fov    f32 = 70.0
+	sens   f32 = 1.0
+	volume f32 = 0.7
+	invert bool
+	// pause menu
+	paused      bool
+	menu_screen MenuScreen
+	menu_sel    int
+	// audio bookkeeping
+	step_acc     f32
+	was_in_water bool
+	was_ground   bool
 }
 
 fn key_down(sc int) bool {
@@ -101,7 +138,7 @@ fn (mut g Game) update_chunks() {
 	pcx := i32(math.floor(f64(g.p.pos[0]))) >> 4
 	pcz := i32(math.floor(f64(g.p.pos[2]))) >> 4
 
-	rd := render_distance + 1
+	rd := g.rd + 1
 	span := rd * 2 + 1
 	for zi in 0 .. span {
 		for xi in 0 .. span {
@@ -125,12 +162,12 @@ fn (mut g Game) update_meshes() {
 	pcx := i32(math.floor(f64(g.p.pos[0]))) >> 4
 	pcz := i32(math.floor(f64(g.p.pos[2]))) >> 4
 
-	mspan := render_distance * 2 + 1
-	rd2 := render_distance * render_distance
+	mspan := g.rd * 2 + 1
+	rd2 := g.rd * g.rd
 	for zi in 0 .. mspan {
 		for xi in 0 .. mspan {
-			dx := xi - render_distance
-			dz := zi - render_distance
+			dx := xi - g.rd
+			dz := zi - g.rd
 			if dx * dx + dz * dz <= rd2 {
 				cx := pcx + dx
 				cz := pcz + dz
@@ -156,7 +193,7 @@ fn (mut g Game) update_meshes() {
 	}
 
 	// drop chunks that fell outside the view radius
-	limit := (render_distance + 3) * (render_distance + 3)
+	limit := (g.rd + 3) * (g.rd + 3)
 	mut drop := []i64{}
 	for k, cm in g.meshes {
 		d := (cm.cx - pcx) * (cm.cx - pcx) + (cm.cz - pcz) * (cm.cz - pcz)
@@ -172,11 +209,26 @@ fn (mut g Game) update_meshes() {
 fn (mut g Game) handle_input(dt f32) {
 	ffi.pump()
 
-	sens := f32(0.0022)
+	// Esc toggles the pause menu; while paused the world is frozen and the
+	// menu owns all input.
+	if key_pressed(sc_escape) {
+		g.toggle_pause()
+		return
+	}
+	if g.paused {
+		g.update_menu(dt)
+		return
+	}
+
+	sens := f32(0.0022) * g.sens
 	// yaw decreases with mouse-right so the view turns the way the mouse
 	// goes: screen right is forward x up, which puts +X on the left.
 	g.p.yaw -= f32(ffi.mouse_dx()) * sens
-	g.p.pitch -= f32(ffi.mouse_dy()) * sens
+	mut pitch_delta := f32(ffi.mouse_dy()) * sens
+	if g.invert {
+		pitch_delta = -pitch_delta
+	}
+	g.p.pitch -= pitch_delta
 	max_pitch := f32(math.pi / 2.0 - 0.001)
 	if g.p.pitch > max_pitch {
 		g.p.pitch = max_pitch
@@ -238,7 +290,38 @@ fn (mut g Game) handle_input(dt f32) {
 		}
 	}
 
+	// Snapshot a little state so the audio cues below can tell what changed.
+	prev_x := g.p.pos[0]
+	prev_z := g.p.pos[2]
+	vy_before := g.p.vel[1]
+	ground_before := g.p.on_ground
+
 	g.p.update(&g.w, inp, dt)
+
+	// Footsteps, splashes, jumps and landings, all driven by movement.
+	dxm := g.p.pos[0] - prev_x
+	dzm := g.p.pos[2] - prev_z
+	moved := f32(math.sqrt(f64(dxm * dxm + dzm * dzm)))
+	if g.p.on_ground && !g.p.in_water {
+		g.step_acc += moved
+		if g.step_acc > 1.7 {
+			g.step_acc = 0.0
+			audio.play_step()
+		}
+	} else {
+		g.step_acc = 0.0
+	}
+	if g.p.in_water && !g.was_in_water {
+		audio.play_splash()
+	}
+	if ground_before && !g.p.on_ground && g.p.vel[1] > 0.0 {
+		audio.play_jump()
+	}
+	if !ground_before && g.p.on_ground && vy_before < f32(-7.0) {
+		audio.play_land()
+	}
+	g.was_in_water = g.p.in_water
+	g.was_ground = g.p.on_ground
 
 	hit := raycast.cast(&g.w, g.p.eye(), g.p.look_dir(), 6.0)
 	g.target = hit
@@ -272,6 +355,7 @@ fn (mut g Game) handle_input(dt f32) {
 		name := blocks.def(hit.block_id).name
 		g.w.set_block(g.break_x, g.break_y, g.break_z, blocks.air)
 		g.logs << 'broke ${name}'
+		audio.play_break()
 		g.update_meshes()
 		g.break_active = false
 		g.break_progress = 0.0
@@ -299,6 +383,7 @@ fn (mut g Game) handle_input(dt f32) {
 			if !overlap {
 				g.w.set_block(t[0], t[1], t[2], b)
 				g.logs << 'placed ${blocks.def(b).name}'
+				audio.play_place()
 				g.update_meshes()
 				g.place_cd = 0.25
 			}
@@ -312,7 +397,7 @@ fn (mut g Game) update_camera(aspect f32) {
 	g.pos = vm.Vec3{x: eye[0], y: eye[1], z: eye[2]}
 	g.dir = vm.Vec3{x: dirs[0], y: dirs[1], z: dirs[2]}
 	target := g.pos.add(g.dir.scale(f32(10.0)))
-	fov := f32(fov_deg) * f32(math.pi) / f32(180.0)
+	fov := g.fov * f32(math.pi) / f32(180.0)
 	g.proj = vm.mat4_perspective(fov, aspect, near_plane, far_plane)
 	g.view = vm.mat4_look_at(g.pos, target, vm.Vec3{x: 0.0, y: 1.0, z: 0.0})
 	g.vp = vm.mat4_mul(g.proj, g.view)
@@ -531,11 +616,429 @@ fn (mut g Game) render_hud() {
 	ffi.ui_end()
 }
 
+// ==================================================================
+// Pause menu + settings
+// ==================================================================
+
+// Menu labels. The settings screen shows the live value next to each name.
+fn (g &Game) menu_items() []string {
+	if g.menu_screen == .settings {
+		inv := if g.invert { 'ON' } else { 'OFF' }
+		vol := int(g.volume * 100.0 + 0.5)
+		fv := int(g.fov + 0.5)
+		return [
+			'RENDER DISTANCE  ${g.rd}',
+			'FIELD OF VIEW  ${fv}',
+			'SENSITIVITY  ${g.sens:.1}',
+			'VOLUME  ${vol}%',
+			'INVERT MOUSE  ${inv}',
+			'BACK',
+		]
+	}
+	return ['RESUME', 'SETTINGS', 'QUIT']
+}
+
+// Rect (x, y, w, h) of menu row `i`, shared by rendering and hit-testing.
+fn menu_item_rect(w f32, h f32, screen MenuScreen, i int) [4]f32 {
+	pw := f32(560.0)
+	ph := if screen == .settings { f32(380.0) } else { f32(280.0) }
+	py := (h - ph) / 2.0
+	iw := pw - f32(96.0)
+	ix := (w - iw) / 2.0
+	iy := py + f32(78.0) + f32(i) * f32(44.0)
+	return [ix, iy, iw, f32(34.0)]
+}
+
+// ---- bitmap text ------------------------------------------------- //
+
+fn tv(mut buf []f32, x f32, y f32, u f32, v f32, col [4]f32) {
+	buf << x
+	buf << y
+	buf << u
+	buf << v
+	buf << col[0]
+	buf << col[1]
+	buf << col[2]
+	buf << col[3]
+}
+
+fn text_quad(mut buf []f32, c int, x f32, y f32, scale f32, col [4]f32) {
+	if c < font.first || c > font.last {
+		return
+	}
+	idx := c - font.first
+	cx := (idx % font.cols) * font.cell_w
+	cy := (idx / font.cols) * font.cell_h
+	u0 := f32(cx) / f32(font.atlas_w)
+	v0 := f32(cy) / f32(font.atlas_h)
+	u1 := f32(cx + font.glyph_w) / f32(font.atlas_w)
+	v1 := f32(cy + font.glyph_h) / f32(font.atlas_h)
+	w := f32(font.glyph_w) * scale
+	h := f32(font.glyph_h) * scale
+	tv(mut buf, x, y, u0, v0, col)
+	tv(mut buf, x + w, y, u1, v0, col)
+	tv(mut buf, x + w, y + h, u1, v1, col)
+	tv(mut buf, x, y, u0, v0, col)
+	tv(mut buf, x + w, y + h, u1, v1, col)
+	tv(mut buf, x, y + h, u0, v1, col)
+}
+
+fn text_buf(mut buf []f32, s string, x f32, y f32, scale f32, col [4]f32) {
+	up := s.to_upper()
+	mut cx := x
+	mut i := 0
+	for i < up.len {
+		text_quad(mut buf, int(up[i]), cx, y, scale, col)
+		cx += f32(font.glyph_w + 1) * scale
+		i++
+	}
+}
+
+fn text_width(s string, scale f32) f32 {
+	return f32(s.len) * f32(font.glyph_w + 1) * scale
+}
+
+// ---- pause menu -------------------------------------------------- //
+
+fn (mut g Game) render_menu() {
+	w := f32(ffi.win_w())
+	h := f32(ffi.win_h())
+	if w < 1.0 || h < 1.0 {
+		return
+	}
+	ortho := vm.mat4_ortho(f32(0.0), w, h, f32(0.0), f32(-1.0), f32(1.0))
+	items := g.menu_items()
+
+	// dim the frozen world, then draw the panel
+	mut ui := []f32{}
+	ui_quad(mut ui, f32(0.0), f32(0.0), w, h, [f32(0.0), f32(0.0), f32(0.0), f32(0.55)])
+	pw := f32(560.0)
+	ph := if g.menu_screen == .settings { f32(380.0) } else { f32(280.0) }
+	px := (w - pw) / 2.0
+	py := (h - ph) / 2.0
+	ui_quad(mut ui, px, py, pw, ph, [f32(0.06), f32(0.07), f32(0.10), f32(0.94)])
+	ui_quad(mut ui, px, py, pw, f32(3.0), [f32(0.36), f32(0.76), f32(0.44), f32(1.0)])
+
+	mut ti := 0
+	for ti < items.len {
+		r := menu_item_rect(w, h, g.menu_screen, ti)
+		if ti == g.menu_sel {
+			ui_quad(mut ui, r[0], r[1], r[2], r[3], [f32(0.30), f32(0.62), f32(0.38), f32(0.95)])
+		} else {
+			ui_quad(mut ui, r[0], r[1], r[2], r[3], [f32(0.14), f32(0.16), f32(0.20), f32(0.85)])
+		}
+		ti++
+	}
+
+	title := if g.menu_screen == .settings { 'SETTINGS' } else { 'VCRAFT' }
+	ts := f32(4.0)
+	mut tb := []f32{}
+	text_buf(mut tb, title, (w - text_width(title, ts)) / 2.0, py + f32(24.0), ts,
+		[f32(0.92), f32(0.96), f32(0.86), f32(1.0)])
+
+	mut di := 0
+	for di < items.len {
+		r := menu_item_rect(w, h, g.menu_screen, di)
+		mut col := [4]f32{}
+		if di == g.menu_sel {
+			col[0] = 1.0
+			col[1] = 1.0
+			col[2] = 1.0
+			col[3] = 1.0
+		} else {
+			col[0] = 0.78
+			col[1] = 0.82
+			col[2] = 0.86
+			col[3] = 1.0
+		}
+		text_buf(mut tb, items[di], (w - text_width(items[di], f32(2.0))) / 2.0,
+			r[1] + f32(10.0), f32(2.0), col)
+		di++
+	}
+
+	ffi.ui_begin()
+	ffi.blend(true)
+	if ui.len > 0 {
+		unsafe {
+			ffi.draw_colors(&ui[0], ui.len / 6, ortho.ptr())
+		}
+	}
+	ffi.text_begin(ortho.ptr())
+	if tb.len > 0 {
+		unsafe {
+			ffi.draw_text(&tb[0], tb.len / 8)
+		}
+	}
+	ffi.blend(false)
+	ffi.ui_end()
+}
+
+fn (mut g Game) toggle_pause() {
+	g.paused = !g.paused
+	if g.paused {
+		g.menu_screen = .main
+		g.menu_sel = 0
+		ffi.set_mouse_relative(false)
+		g.break_active = false
+		g.break_progress = 0.0
+		g.break_frac = 0.0
+	} else {
+		g.menu_screen = .none
+		ffi.set_mouse_relative(true)
+		g.save_settings()
+	}
+}
+
+fn (mut g Game) update_menu(dt f32) {
+	_ = dt
+	items := g.menu_items()
+	n := items.len
+	if n == 0 {
+		return
+	}
+
+	// Mouse hover moves the selection.
+	w := f32(ffi.win_w())
+	h := f32(ffi.win_h())
+	mx := f32(ffi.mouse_x())
+	my := f32(ffi.mouse_y())
+	mut i := 0
+	for i < n {
+		r := menu_item_rect(w, h, g.menu_screen, i)
+		if mx >= r[0] && mx <= r[0] + r[2] && my >= r[1] && my <= r[1] + r[3] {
+			g.menu_sel = i
+		}
+		i++
+	}
+
+	if key_pressed(sc_up) || key_pressed(sc_w) {
+		g.menu_sel = (g.menu_sel + n - 1) % n
+		audio.play_click()
+	}
+	if key_pressed(sc_down) || key_pressed(sc_s) {
+		g.menu_sel = (g.menu_sel + 1) % n
+		audio.play_click()
+	}
+
+	// Left/right adjust the highlighted setting (the last row is BACK).
+	if g.menu_screen == .settings && g.menu_sel < menu_settings_items - 1 {
+		mut delta := 0
+		if key_pressed(sc_left) || key_pressed(sc_a) {
+			delta = -1
+		}
+		if key_pressed(sc_right) || key_pressed(sc_d) {
+			delta = 1
+		}
+		if delta != 0 {
+			g.adjust_setting(g.menu_sel, delta)
+		}
+	}
+
+	if key_pressed(sc_enter) || key_pressed(sc_space) {
+		g.activate_menu_item()
+	}
+	if ffi.button_pressed(0) {
+		g.activate_menu_item()
+	}
+}
+
+fn (mut g Game) activate_menu_item() {
+	if g.menu_screen == .settings {
+		if g.menu_sel == menu_settings_items - 1 {
+			audio.play_click()
+			g.menu_screen = .main
+			g.menu_sel = 1
+		} else {
+			g.adjust_setting(g.menu_sel, 1)
+		}
+		return
+	}
+	audio.play_click()
+	match g.menu_sel {
+		0 { g.toggle_pause() }
+		1 {
+			g.menu_screen = .settings
+			g.menu_sel = 0
+		}
+		2 { ffi.request_close() }
+		else {}
+	}
+}
+
+fn (mut g Game) adjust_setting(idx int, dir int) {
+	audio.play_click()
+	match idx {
+		0 {
+			g.rd += dir
+			if g.rd < min_rd {
+				g.rd = min_rd
+			}
+			if g.rd > max_rd {
+				g.rd = max_rd
+			}
+			g.update_chunks()
+			g.update_meshes()
+		}
+		1 {
+			g.fov += f32(dir) * 5.0
+			if g.fov < min_fov {
+				g.fov = min_fov
+			}
+			if g.fov > max_fov {
+				g.fov = max_fov
+			}
+		}
+		2 {
+			g.sens += f32(dir) * 0.1
+			if g.sens < 0.2 {
+				g.sens = 0.2
+			}
+			if g.sens > 3.0 {
+				g.sens = 3.0
+			}
+		}
+		3 {
+			g.volume += f32(dir) * 0.05
+			if g.volume < 0.0 {
+				g.volume = 0.0
+			}
+			if g.volume > 1.0 {
+				g.volume = 1.0
+			}
+			audio.set_volume(g.volume)
+		}
+		4 {
+			g.invert = !g.invert
+		}
+		else {}
+	}
+	g.save_settings()
+}
+
+// ---- settings persistence ---------------------------------------- //
+
+// The self-test never reads or writes a player's real configuration: VTEST
+// redirects it to a scratch file that only this program ever looks at.
+const test_settings_path = '/tmp/opencode/vcraft-test-settings.cfg'
+
+fn self_testing() bool {
+	return os.getenv('VTEST') != ''
+}
+
+fn settings_path() string {
+	if self_testing() {
+		return test_settings_path
+	}
+	override := os.getenv('VCRAFT_CONFIG')
+	if override != '' {
+		return override
+	}
+	home := os.getenv('HOME')
+	if home == '' {
+		return ''
+	}
+	return home + '/.config/vcraft/settings.cfg'
+}
+
+// A snapshot of the five tunable values, so the self-test can put them back
+// the way it found them.
+struct Tune {
+mut:
+	rd     int
+	fov    f32
+	sens   f32
+	volume f32
+	invert bool
+}
+
+fn (g &Game) tune() Tune {
+	return Tune{ rd: g.rd, fov: g.fov, sens: g.sens, volume: g.volume, invert: g.invert }
+}
+
+fn (mut g Game) apply_tune(t Tune) {
+	g.rd = t.rd
+	g.fov = t.fov
+	g.sens = t.sens
+	g.volume = t.volume
+	g.invert = t.invert
+	audio.set_volume(g.volume)
+}
+
+// The values a fresh install starts with.
+fn (mut g Game) reset_settings() {
+	g.apply_tune(Tune{ rd: 6, fov: 70.0, sens: 1.0, volume: 0.7, invert: false })
+}
+
+fn clamp_f32(v f32, lo f32, hi f32) f32 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+fn (mut g Game) load_settings() {
+	p := settings_path()
+	if p == '' {
+		return
+	}
+	txt := os.read_file(p) or { return }
+	for line in txt.split_into_lines() {
+		kv := line.split('=')
+		if kv.len != 2 {
+			continue
+		}
+		key := kv[0].trim_space()
+		val := kv[1].trim_space()
+		match key {
+			'render_distance' {
+				g.rd = clamp_int(val.int(), min_rd, max_rd)
+			}
+			'fov' {
+				g.fov = clamp_f32(f32(val.f64()), min_fov, max_fov)
+			}
+			'sensitivity' {
+				g.sens = clamp_f32(f32(val.f64()), 0.2, 3.0)
+			}
+			'volume' {
+				g.volume = clamp_f32(f32(val.f64()), 0.0, 1.0)
+			}
+			'invert_mouse' {
+				g.invert = val == '1'
+			}
+			else {}
+		}
+	}
+}
+
+fn (g &Game) save_settings() {
+	p := settings_path()
+	if p == '' {
+		return
+	}
+	os.mkdir_all(os.dir(p)) or {}
+	inv := if g.invert { 1 } else { 0 }
+	txt := 'render_distance=${g.rd}\nfov=${g.fov:.1}\nsensitivity=${g.sens:.2}\nvolume=${g.volume:.2}\ninvert_mouse=${inv}\n'
+	os.write_file(p, txt) or {}
+}
+
+fn clamp_int(v int, lo int, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
 fn (mut g Game) render() {
 	sky := sky_color(g.time)
 	ffi.begin(1, sky[0], sky[1], sky[2])
 
-	mut fog_far := f32(render_distance * world.chunk_size) * 0.95
+	mut fog_far := f32(g.rd * world.chunk_size) * 0.95
 	if os.getenv('VFOG') == '0' {
 		fog_far = f32(far_plane)
 	}
@@ -605,6 +1108,9 @@ fn (mut g Game) render() {
 	}
 
 	g.render_hud()
+	if g.paused {
+		g.render_menu()
+	}
 }
 
 fn (mut g Game) run() {
@@ -623,7 +1129,9 @@ fn (mut g Game) run() {
 		}
 		last = now
 		dt := f32(dt_ms) / f32(1000.0)
-		g.time += f32(dt_ms) / f32(1000.0)
+		if !g.paused {
+			g.time += f32(dt_ms) / f32(1000.0)
+		}
 		g.frame++
 
 		g.handle_input(dt)
@@ -657,7 +1165,10 @@ fn (mut g Game) simulate(frames int, dt f32) {
 	mut last_cz := i32(math.floor(f64(g.p.pos[2]))) >> 4
 	mut i := 0
 	for i < frames {
-		g.time += dt
+		// Mirrors run(): a paused world keeps its clock still.
+		if !g.paused {
+			g.time += dt
+		}
 		g.frame++
 		g.handle_input(dt)
 		cx := i32(math.floor(f64(g.p.pos[0]))) >> 4
@@ -677,6 +1188,15 @@ fn (mut g Game) simulate(frames int, dt f32) {
 // Headless self-test of the parts a screenshot cannot show.
 fn (mut g Game) selftest() {
 	mut failures := 0
+
+	// Start from a known state: a settings file left behind by an earlier run
+	// (or a hand-edited one) would otherwise decide the render distance, and
+	// a stale high value is enough to wedge the GL driver.
+	if self_testing() {
+		os.rm(settings_path()) or {}
+		g.reset_settings()
+	}
+	orig := g.tune()
 
 	// Flatten a small arena around the player: the spawn is often a forest
 	// now, and tree trunks/canopies at eye level would clip the movement,
@@ -800,7 +1320,10 @@ fn (mut g Game) selftest() {
 		sc_check('D', sc_d) + sc_check('Space', sc_space) +
 		sc_check('Left Shift', sc_shift_l) + sc_check('Left Ctrl', sc_ctrl_l) +
 		sc_check('F', sc_f) + sc_check('1', sc_1) +
-		sc_check('[', sc_lbracket) + sc_check(']', sc_rbracket)
+		sc_check('[', sc_lbracket) + sc_check(']', sc_rbracket) +
+		sc_check('Escape', sc_escape) + sc_check('Return', sc_enter) +
+		sc_check('Up', sc_up) + sc_check('Down', sc_down) +
+		sc_check('Left', sc_left) + sc_check('Right', sc_right)
 	ok = bad == ''
 	println('test scancodes : ${ok} ${bad}')
 	if !ok {
@@ -1000,6 +1523,169 @@ fn (mut g Game) selftest() {
 		failures++
 	}
 
+	// 14. the procedural font must actually contain glyph pixels, and
+	// layout must produce six vertices (one quad) per character.
+	fatlas := font.build_font()
+	mut lit := 0
+	mut fi := 0
+	for fi < font.atlas_w * font.atlas_h {
+		if fatlas[fi * 4 + 3] != 0 {
+			lit++
+		}
+		fi++
+	}
+	mut tb := []f32{}
+	text_buf(mut tb, 'ABC', f32(0.0), f32(0.0), f32(2.0), [f32(1.0), f32(1.0), f32(1.0), f32(1.0)])
+	ok = lit > 100 && tb.len == 3 * 6 * 8 && text_width('ABC', f32(2.0)) > 0.0
+	println('test font    : ${ok} lit=${lit} verts=${tb.len / 8} width=${text_width('ABC', f32(2.0)):.0f}')
+	if !ok {
+		failures++
+	}
+
+	// 15. every sound cue must be synthesised to a non-empty waveform.
+	cnts := audio.sample_counts()
+	mut amin := cnts[0]
+	for c in cnts {
+		if c < amin {
+			amin = c
+		}
+	}
+	ok = amin > 0
+	println('test audio   : ${ok} cues=${cnts.len} shortest=${amin} samples')
+	if !ok {
+		failures++
+	}
+
+	// 16. settings must survive a save/load round-trip, and out-of-range or
+	// corrupt values must be clamped rather than trusted.
+	g.rd = 7
+	g.fov = 85.0
+	g.sens = 1.7
+	g.volume = 0.42
+	g.invert = true
+	g.save_settings()
+	g.rd = 6
+	g.fov = 70.0
+	g.sens = 1.0
+	g.volume = 0.7
+	g.invert = false
+	g.load_settings()
+	ok = g.rd == 7 && int(g.fov + 0.5) == 85 && g.invert && g.volume > 0.4 && g.sens > 1.5
+	println('test settings: ${ok} rd=${g.rd} fov=${g.fov:.0f} sens=${g.sens:.1} vol=${g.volume:.2f} invert=${g.invert}')
+	if !ok {
+		failures++
+	}
+
+	os.write_file(settings_path(), 'render_distance=999\nfov=1\nvolume=-4\nsensitivity=99\ninvert_mouse=maybe\n') or {
+		failures++
+	}
+	g.load_settings()
+	ok = g.rd == max_rd && int(g.fov + 0.5) == 40 && g.volume == 0.0 && g.sens > 2.9
+		&& !g.invert
+	println('test clamp   : ${ok} rd=${g.rd} fov=${g.fov:.0f} sens=${g.sens:.1} vol=${g.volume:.2f}')
+	if !ok {
+		failures++
+	}
+
+	// 17. Esc opens the pause menu (freezing play), arrows navigate, the
+	// selected setting is adjustable, and Esc resumes.
+	g.apply_tune(orig)
+	g.paused = false
+	g.menu_screen = .none
+	ffi.inject_key(sc_escape, true)
+	g.handle_input(f32(1.0 / 60.0))
+	ffi.inject_key(sc_escape, false)
+	g.handle_input(f32(1.0 / 60.0))
+	ok = g.paused && g.menu_screen == .main && g.menu_items().len == menu_main_items
+	println('test pause   : ${ok} paused=${g.paused} sel=${g.menu_sel}')
+	if !ok {
+		failures++
+	}
+
+	g.menu_sel = 0
+	ffi.inject_key(sc_down, true)
+	g.handle_input(f32(1.0 / 60.0))
+	ffi.inject_key(sc_down, false)
+	g.handle_input(f32(1.0 / 60.0))
+	ffi.inject_key(sc_enter, true)
+	g.handle_input(f32(1.0 / 60.0))
+	ffi.inject_key(sc_enter, false)
+	g.handle_input(f32(1.0 / 60.0))
+	ok = g.menu_screen == .settings && g.menu_items().len == menu_settings_items
+	println('test menu nav: ${ok} screen=${int(g.menu_screen)} sel=${g.menu_sel}')
+	if !ok {
+		failures++
+	}
+
+	// Drawing the menu exercises the text program and font texture.
+	g.update_camera(f32(window_w) / f32(window_h))
+	g.render()
+
+	rd0 := g.rd
+	ffi.inject_key(sc_right, true)
+	g.handle_input(f32(1.0 / 60.0))
+	ffi.inject_key(sc_right, false)
+	g.handle_input(f32(1.0 / 60.0))
+	ok = g.rd == rd0 + 1
+	println('test setting : ${ok} rd ${rd0} -> ${g.rd}')
+	if !ok {
+		failures++
+	}
+
+	// Invert is a toggle: left and right both flip it, which is what a
+	// player expects from a row with no "left/right" affordance.
+	inv0 := g.invert
+	g.menu_sel = 4
+	ffi.inject_key(sc_right, true)
+	g.handle_input(f32(1.0 / 60.0))
+	ffi.inject_key(sc_right, false)
+	g.handle_input(f32(1.0 / 60.0))
+	ok = g.invert != inv0
+	println('test toggle  : ${ok} invert ${inv0} -> ${g.invert}')
+	if !ok {
+		failures++
+	}
+
+	// The volume row must also drive the audio mixer, not just the label.
+	vol0 := g.volume
+	g.menu_sel = 3
+	ffi.inject_key(sc_left, true)
+	g.handle_input(f32(1.0 / 60.0))
+	ffi.inject_key(sc_left, false)
+	g.handle_input(f32(1.0 / 60.0))
+	ok = g.volume < vol0 && audio.volume() == g.volume
+	println('test volume  : ${ok} ${vol0:.2f} -> ${g.volume:.2f} mixer=${audio.volume():.2f}')
+	if !ok {
+		failures++
+	}
+
+	ffi.inject_key(sc_escape, true)
+	g.handle_input(f32(1.0 / 60.0))
+	ffi.inject_key(sc_escape, false)
+	g.handle_input(f32(1.0 / 60.0))
+	ok = !g.paused && g.menu_screen == .none
+	println('test resume  : ${ok} paused=${g.paused}')
+	if !ok {
+		failures++
+	}
+
+	// The menu must freeze the world clock, otherwise time-driven shaders
+	// keep animating behind a menu that promises a pause.
+	g.paused = true
+	t0 := g.time
+	g.simulate(30, f32(1.0 / 60.0))
+	ok = g.time == t0
+	println('test freeze  : ${ok} time ${t0:.3f} -> ${g.time:.3f}')
+	if !ok {
+		failures++
+	}
+	g.paused = false
+	g.apply_tune(orig)
+	g.save_settings()
+	if self_testing() {
+		os.rm(settings_path()) or {}
+	}
+
 	if failures == 0 {
 		println('SELFTEST PASS')
 	} else {
@@ -1161,10 +1847,17 @@ fn main() {
 	ffi.use_texture(tex)
 	println('atlas   : ${blocks.layer_count} layers @ ${texture.tex_size}px')
 
+	font_atlas := font.build_font()
+	ffi.make_font_texture(&font_atlas[0], font.atlas_w, font.atlas_h)
+
 	mut g := Game{
 		w:      world.new_world(world_seed)
 		meshes: map[i64]ChunkMesh{}
 	}
+	g.load_settings()
+	audio.init(g.volume, !headless)
+	audio_status := if audio.available() { '48kHz mono' } else { 'disabled' }
+	println('audio   : ' + audio_status)
 
 	if os.getenv('VSTATS') != '' {
 		print_height_stats()
@@ -1374,6 +2067,18 @@ fn main() {
 
 	if headless {
 		g.update_camera(f32(window_w) / f32(window_h))
+		if os.getenv('VMENU') != '' {
+			g.paused = true
+			g.menu_screen = if os.getenv('VMENU') == 'settings' {
+				MenuScreen.settings
+			} else {
+				MenuScreen.main
+			}
+			g.menu_sel = 0
+			g.render()
+			save_shot()
+			return
+		}
 		g.render()
 		if os.getenv('VTEST') != '' {
 			g.selftest()
@@ -1383,7 +2088,7 @@ fn main() {
 	}
 
 	println('controls: WASD move | mouse look | LMB break | RMB place | 1-9 hotbar')
-	println('          shift sneak | ctrl sprint | space jump | F fly | Esc quit')
+	println('          shift sneak | ctrl sprint | space jump | F fly | Esc pause')
 	g.run()
 	println('bye')
 }

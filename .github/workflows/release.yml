@@ -1,0 +1,81 @@
+name: release
+
+# Releases are manual on purpose: push as many branches, commits and PRs as
+# you like (ci.yml verifies each one), and when a batch of features feels
+# finished, run this workflow to build the AppImage for a version. It creates
+# a DRAFT release - download and try the AppImage from the draft, and press
+# "Publish release" only when you are happy with it. Until then nothing is
+# public and the README's releases/latest link keeps pointing at the last
+# published version.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 0.2.0 (without the leading v)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Check version
+        run: |
+          set -euo pipefail
+          v="${{ inputs.version }}"
+          v="${v#v}"
+          if ! printf '%s' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'${{ inputs.version }}' is not a MAJOR.MINOR.PATCH version"
+            exit 1
+          fi
+          echo "version: v$v"
+
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git curl python sdl2 mesa libglvnd zlib
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install V 0.5.2
+        run: |
+          git clone --depth 1 --branch 0.5.2 https://github.com/vlang/v /opt/v
+          make -C /opt/v
+          ln -sf /opt/v/v /usr/local/bin/v
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Self-test (release gate)
+        run: |
+          set -o pipefail
+          EGL_PLATFORM=surfaceless VHEADLESS=1 VTEST=1 VSHOT=/tmp/selftest.png \
+            ./build/vcraft | tee /tmp/selftest.log
+          grep -q "SELFTEST PASS" /tmp/selftest.log
+
+      - name: Package AppImage
+        run: |
+          export TOOLS=/tmp/vcraft-tools
+          ./package.sh
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: VCraft ${{ inputs.version }}
+          draft: true
+          files: dist/vcraft-x86_64.AppImage
+          generate_release_notes: true
+
+      - name: Remind
+        run: |
+          echo "::notice::Draft release v${{ inputs.version }} created. Download the"
+          echo "::notice::AppImage from the draft's assets, try it, then press"
+          echo "::notice::'Publish release' on the Releases page to make it public."

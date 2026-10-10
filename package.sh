@@ -14,6 +14,7 @@ ROOT="$PWD"
 DIST="$ROOT/dist"
 APPDIR="$ROOT/build/vcraft.AppDir"
 TOOLS="${TOOLS:-/tmp/opencode}"
+mkdir -p "$TOOLS"
 
 echo "==> [1/4] building game"
 ./build.sh
