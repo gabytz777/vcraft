@@ -4,23 +4,46 @@ A small Minecraft-like voxel sandbox written entirely in [V](https://vlang.io).
 Procedural terrain, biomes, water, mining/building, a hotbar, and a HUD — no
 Mojang assets, all textures are generated as pixel art at startup.
 
-## Build
+> **Disclaimer:** VCraft has only been tested on **CachyOS / Arch Linux**. It
+> links against the system SDL2, EGL, OpenGL, and zlib libraries, so it may run
+> on other modern Linux desktops, but nothing else has been verified. No
+> Windows or macOS builds.
 
-Needs V (with the `gcc` backend) plus the system `SDL2`, `EGL`, `OpenGL`, and
-`zlib` dev libraries.
+## Download
+
+Direct download — grab the latest AppImage and run it:
 
 ```sh
-./build.sh          # -> build/vcraft
+wget https://github.com/gabytz777/vcraft/releases/latest/download/vcraft-x86_64.AppImage
+chmod +x vcraft-x86_64.AppImage
+./vcraft-x86_64.AppImage
 ```
 
-## Run
+More builds on the [releases page](https://github.com/gabytz777/vcraft/releases/latest).
+
+## Build from source
+
+Requires V (with the `gcc` backend) and the `SDL2`, `EGL`, `OpenGL`, and `zlib`
+development packages. On Arch / CachyOS:
 
 ```sh
+sudo pacman -S base-devel sdl2 mesa zlib   # then install V from vlang.io
+git clone https://github.com/gabytz777/vcraft.git
+cd vcraft
+./build.sh          # -> build/vcraft
 ./build/vcraft
 ```
 
-Controls: `WASD` move · mouse look · `LMB` break · `RMB` place · `1-9` hotbar ·
-`[` `]` cycle · `space` jump · `shift` sneak · `ctrl` sprint · `F` fly · `Esc` quit.
+To produce your own AppImage:
+
+```sh
+./package.sh        # -> dist/vcraft-x86_64.AppImage
+```
+
+## Controls
+
+`WASD` move · mouse look · `LMB` break · `RMB` place · `1-9` hotbar · `[` `]`
+cycle · `space` jump · `shift` sneak · `ctrl` sprint · `F` fly · `Esc` quit.
 
 ## How it's built
 
