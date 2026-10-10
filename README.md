@@ -1,5 +1,7 @@
 # VCraft
 
+[![Mentioned in Awesome V](https://awesome.re/mentioned-badge.svg)](https://github.com/vlang/awesome-v)
+
 A small Minecraft-like voxel sandbox written entirely in [V](https://vlang.io).
 Procedural terrain, biomes, water, mining/building, a hotbar, and a HUD — no
 Mojang assets, all textures are generated as pixel art at startup.
