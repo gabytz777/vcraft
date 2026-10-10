@@ -54,9 +54,9 @@ cycle · `space` jump · `shift` sneak · `ctrl` sprint · `F` fly · `Esc` quit
 
 - **All game logic is in V.** `src/` holds world generation, meshing, physics,
   raycasting, textures, and input handling.
-- **No project-owned C.** `src/ffi.v` talks to SDL2 / EGL / OpenGL / zlib
-  directly through V's FFI — those libraries only expose a C ABI, but every line
-  of our own platform code is V.
+- **100% V, zero C.** Every line of the project — game logic *and* the platform
+  layer — is written in V. `src/ffi.v` binds SDL2, EGL, OpenGL, and zlib through
+  V's FFI, so there is no C source anywhere in the repo.
 - **Headless self-test.** An EGL surfaceless context plus synthetic input
   injection drive a full render + input + physics test with no window or human:
 
