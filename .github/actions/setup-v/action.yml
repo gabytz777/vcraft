@@ -1,0 +1,36 @@
+name: setup-v
+description: Build the V compiler this project needs, at a pinned commit
+
+# Why build V instead of downloading a release zip: the published 0.5.2
+# binaries predate V's support for this project's `src/` layout and refuse
+# to compile it ("the virtual `src/` module directory is no longer
+# supported"). The development machine runs a post-0.5.2 master build, so
+# CI has to match that.
+#
+# Why the commit is pinned rather than the 0.5.2 tag: `make` clones the tip
+# of vlang/vc to bootstrap itself, and vc has since moved past what the
+# 0.5.2 tag's own vlib can parse, so the tag fails to build with
+#
+#   vlib/math/bits/bits.v:621: error: the condition of an `if` cannot
+#   start with a parenthesized `if` expression
+#
+# A master commit is self-consistent (its vc matches its vlib) and is the
+# only combination verified to build this project. Pinning the exact commit
+# keeps that guarantee from decaying as master moves on; bump it
+# deliberately, after checking a local build still passes.
+runs:
+  using: composite
+  steps:
+    - name: Clone V
+      run: |
+        git clone https://github.com/vlang/v /opt/v
+        cd /opt/v
+        git checkout 03e12f368ad5061756d523891e12cd759053f486
+
+    - name: Build V
+      run: make -C /opt/v
+
+    - name: Put V on PATH
+      run: |
+        ln -sf /opt/v/v /usr/local/bin/v
+        v version

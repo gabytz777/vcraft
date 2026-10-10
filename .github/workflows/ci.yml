@@ -22,12 +22,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install V 0.5.2
-        run: |
-          git clone --depth 1 --branch 0.5.2 https://github.com/vlang/v /opt/v
-          make -C /opt/v
-          ln -sf /opt/v/v /usr/local/bin/v
-          v version
+      - name: Install V
+        uses: ./.github/actions/setup-v
 
       - name: Build
         run: ./build.sh
