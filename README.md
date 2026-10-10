@@ -21,6 +21,9 @@ chmod +x vcraft-x86_64.AppImage
 
 More builds on the [releases page](https://github.com/gabytz777/vcraft/releases/latest).
 
+> **Note:** GitHub downloads the file *without* the execute flag, so double-clicking
+> may do nothing. If that happens, run the two commands above in a terminal.
+
 ## Build from source
 
 Requires V (with the `gcc` backend) and the `SDL2`, `EGL`, `OpenGL`, and `zlib`
