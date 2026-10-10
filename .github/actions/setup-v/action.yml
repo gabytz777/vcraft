@@ -28,9 +28,15 @@ runs:
         cd /opt/v
         git checkout 03e12f368ad5061756d523891e12cd759053f486
 
+    # V's post-build step registers a GitHub problem matcher pointing at
+    # /opt/v, outside the workspace. The runner rejects an add-matcher path
+    # it cannot resolve and fails the step, even though V built fine.
+    # Unsetting GITHUB_JOB makes that step exit immediately; the matcher only
+    # prettifies V compiler annotations, and this job reports through the
+    # self-test gate instead.
     - name: Build V
       shell: bash
-      run: make -C /opt/v
+      run: env -u GITHUB_JOB make -C /opt/v
 
     - name: Put V on PATH
       shell: bash
