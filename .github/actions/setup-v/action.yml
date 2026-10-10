@@ -22,15 +22,18 @@ runs:
   using: composite
   steps:
     - name: Clone V
+      shell: bash
       run: |
         git clone https://github.com/vlang/v /opt/v
         cd /opt/v
         git checkout 03e12f368ad5061756d523891e12cd759053f486
 
     - name: Build V
+      shell: bash
       run: make -C /opt/v
 
     - name: Put V on PATH
+      shell: bash
       run: |
         ln -sf /opt/v/v /usr/local/bin/v
         v version
