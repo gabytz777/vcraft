@@ -1,0 +1,2 @@
+# v.mod is a V module manifest, but GitHub Linguist misdetects .mod as AMPL.
+v.mod linguist-language=V
