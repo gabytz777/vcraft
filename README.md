@@ -9,10 +9,6 @@ textures, the bitmap font, and every sound are generated at startup.
 
 ![VCraft gameplay](scs/game.png)
 
-![VCraft pause menu](scs/pause.png)
-
-![VCraft settings](scs/menu.png)
-
 > **Disclaimer:** VCraft has only been tested on **CachyOS / Arch Linux**. It
 > links against the system SDL2, EGL, OpenGL, and zlib libraries, so it may run
 > on other modern Linux desktops, but nothing else has been verified. No
