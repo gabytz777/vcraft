@@ -6,6 +6,8 @@ A small Minecraft-like voxel sandbox written entirely in [V](https://vlang.io).
 Procedural terrain, biomes, water, mining/building, a hotbar, and a HUD — no
 Mojang assets, all textures are generated as pixel art at startup.
 
+![VCraft gameplay](scs/game.png)
+
 > **Disclaimer:** VCraft has only been tested on **CachyOS / Arch Linux**. It
 > links against the system SDL2, EGL, OpenGL, and zlib libraries, so it may run
 > on other modern Linux desktops, but nothing else has been verified. No
