@@ -7,6 +7,19 @@ name: release
 # "Publish release" only when you are happy with it. Until then nothing is
 # public and the README's releases/latest link keeps pointing at the last
 # published version.
+#
+# The AppImage is built on the oldest still-supported Ubuntu LTS (a container
+# of it on top of whatever runner GitHub currently offers), not on Arch like
+# the development builds: a binary only runs where the host's C library is at
+# least as new as the one it was linked against, so an AppImage built on Arch
+# (glibc 2.38+ as of the v0.1.0 release) refuses to start on anything older,
+# including the AppImage catalog's test system (ubuntu-22.04), which rejected
+# v0.1.0 exactly that way:
+#   libc.so.6: version `GLIBC_2.38' not found (required by vcraft)
+# Building on the old baseline instead makes the AppImage run on every Linux
+# that is still supported, including the catalog. Bump the container only
+# when that LTS leaves standard support
+# (https://ubuntu.com/about/release-cycle).
 on:
   workflow_dispatch:
     inputs:
@@ -22,8 +35,25 @@ jobs:
   release:
     runs-on: ubuntu-latest
     container:
-      image: archlinux:base-devel
+      image: ubuntu:22.04
     steps:
+      - name: Install dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          # build/link deps for the game (SDL2, EGL, GL, zlib are system
+          # libraries the AppImage will expect on the host) ...
+          apt-get install -y --no-install-recommends \
+            build-essential git curl python3 ca-certificates \
+            libsdl2-dev libegl-dev libgl-dev zlib1g-dev \
+            libegl-mesa0 libgl1-mesa-dri
+          # ... plus a minimal X stack for the windowed smoke test below
+          apt-get install -y --no-install-recommends \
+            xvfb icewm xdotool libglx-mesa0
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Check version
         run: |
           set -euo pipefail
@@ -33,21 +63,17 @@ jobs:
             echo "::error::'${{ inputs.version }}' is not a MAJOR.MINOR.PATCH version"
             exit 1
           fi
+          # The AppImage's AppStream metadata takes its version from v.mod,
+          # so the two must agree before anything is released.
+          mod="$(sed -n "s/^[[:space:]]*version:[[:space:]]*'\([^']*\)'.*/\1/p" v.mod)"
+          if [ "$mod" != "$v" ]; then
+            echo "::error::Version mismatch: input is v$v but v.mod says $mod. Update v.mod (it feeds the AppStream metadata) and try again."
+            exit 1
+          fi
           echo "version: v$v"
 
-      - name: Install dependencies
-        run: |
-          pacman -Syu --noconfirm --needed \
-            git curl python sdl2 mesa libglvnd zlib
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install V 0.5.2
-        run: |
-          git clone --depth 1 --branch 0.5.2 https://github.com/vlang/v /opt/v
-          make -C /opt/v
-          ln -sf /opt/v/v /usr/local/bin/v
+      - name: Install V
+        uses: ./.github/actions/setup-v
 
       - name: Build
         run: ./build.sh
@@ -63,6 +89,47 @@ jobs:
         run: |
           export TOOLS=/tmp/vcraft-tools
           ./package.sh
+
+      # The AppImage catalog (appimage.github.io) accepts an AppImage only if
+      # it shows a window within ~10 seconds on an Xvfb software-rendered X
+      # server, with no network and no GPU. Run the built AppImage through the
+      # same motions here (minus the network sandbox) so a release cannot be
+      # published that the catalog would reject - v0.1.0 was, for the glibc
+      # reason above, and the failure only showed up in their CI.
+      - name: Windowed smoke test (AppImage under Xvfb)
+        run: |
+          set -o pipefail
+          xvfb-run -a -s "-screen 0 800x600x24" bash -c '
+            # No taskbar: the window we are looking for must be the game, not
+            # the window manager (the catalog hides the taskbar of icewm too).
+            mkdir -p "$HOME/.icewm"
+            printf "ShowTaskBar = 0\nTaskBarAutoHide = 1\nTaskBarShowWorkspaces = 0\nTaskBarShowAllWindows = 0\nTaskBarShowClock = 0\nTaskBarShowMailboxStatus = 0\nTaskBarShowCPUStatus = 0\nTaskBarShowWindowListMenu = 0\n" \
+              > "$HOME/.icewm/preferences"
+            icewm >/dev/null 2>&1 &
+            # Containers have no FUSE device; the runtime can extract instead.
+            APPIMAGE_EXTRACT_AND_RUN=1 ./dist/vcraft-x86_64.AppImage \
+              > /tmp/windowed.log 2>&1 &
+            pid=$!
+            found=""
+            # The catalog waits 10 seconds for a window, then up to 20 more.
+            for i in $(seq 1 30); do
+              kill -0 "$pid" 2>/dev/null || break
+              if timeout 5 xdotool search --onlyvisible --name "VCraft" \
+                >/dev/null 2>&1; then
+                found=yes
+                break
+              fi
+              sleep 1
+            done
+            kill "$pid" 2>/dev/null || true
+            sleep 1
+            cat /tmp/windowed.log
+            if [ -z "$found" ]; then
+              echo "ERROR: the AppImage exited or showed no VCraft window"
+              exit 1
+            fi
+            echo "OK: the AppImage showed a window"
+          '
 
       - name: Create draft release
         uses: softprops/action-gh-release@v2

@@ -9,10 +9,12 @@ textures, the bitmap font, and every sound are generated at startup.
 
 ![VCraft gameplay](scs/game.png)
 
-> **Disclaimer:** VCraft has only been tested on **CachyOS / Arch Linux**. It
-> links against the system SDL2, EGL, OpenGL, and zlib libraries, so it may run
-> on other modern Linux desktops, but nothing else has been verified. No
-> Windows or macOS builds.
+> **Disclaimer:** VCraft is developed and tested on **CachyOS / Arch Linux**.
+> The released AppImage is built on the oldest still-supported Ubuntu LTS (so
+> its binary runs on any current Linux, not just rolling-release ones) and
+> links against the system SDL2, EGL, OpenGL, and zlib libraries, so it should
+> run on most Linux desktops with a standard graphics stack — but only
+> Arch/CachyOS has been verified by hand. No Windows or macOS builds.
 
 ## Download
 

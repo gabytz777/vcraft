@@ -7,6 +7,12 @@
 # The AppImage bundles the game binary and launcher; it relies on the host
 # providing the standard graphics stack (libSDL2, libEGL, libGL, libz), which
 # is present on Arch/CachyOS and most desktops. See the README disclaimer.
+#
+# Run this on the oldest still-supported Ubuntu LTS (release.yml does): a
+# binary only runs where the host's C library is at least as new as the one
+# it was linked against, so building on an old base widens compatibility
+# instead of narrowing it. The AppImage catalog (appimage.github.io) tests on
+# that same baseline and rejects AppImages built against a newer glibc.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -32,7 +38,11 @@ exec "$HERE/usr/bin/vcraft" "$@"
 EOF
 chmod +x "$APPDIR/AppRun"
 
-cat > "$APPDIR/vcraft.desktop" <<'EOF'
+# The desktop file is named after the AppStream id so that appstreamcli and
+# software centres can tie the two together; Icon= and Name= keep the plain
+# project names, which is what the AppDir icon lookup expects.
+DESKTOP="$APPDIR/io.github.gabytz777.vcraft.desktop"
+cat > "$DESKTOP" <<'EOF'
 [Desktop Entry]
 Type=Application
 Name=VCraft
@@ -41,6 +51,45 @@ Exec=vcraft
 Icon=vcraft
 Categories=Game;
 Terminal=false
+EOF
+# AppDir convention: a copy in the standard location for desktop integration
+# and appstreamcli's launchable resolution, next to the one at the top level.
+mkdir -p "$APPDIR/usr/share/applications"
+cp "$DESKTOP" "$APPDIR/usr/share/applications/"
+
+# AppStream metainfo, so the AppImage carries its own description (and the
+# AppImage catalog stops warning about a missing appdata file). Version and
+# date come from v.mod and the build clock, so they never drift.
+VERSION="$(sed -n "s/^[[:space:]]*version:[[:space:]]*'\([^']*\)'.*/\1/p" "$ROOT/v.mod")"
+DATE="$(date -u +%F)"
+mkdir -p "$APPDIR/usr/share/metainfo"
+cat > "$APPDIR/usr/share/metainfo/io.github.gabytz777.vcraft.appdata.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.gabytz777.vcraft</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>VCraft</name>
+  <summary>Voxel sandbox game written in V</summary>
+  <description>
+    <p>VCraft is a small Minecraft-like voxel sandbox written entirely in V.
+    It has procedural terrain with biomes, caves and water, mining and
+    building, a hotbar, a pause menu with settings, and procedurally
+    generated sound effects.</p>
+    <p>All textures, the bitmap font and every sound are generated at
+    startup; no third-party game assets are used.</p>
+  </description>
+  <launchable type="desktop-id">io.github.gabytz777.vcraft.desktop</launchable>
+  <url type="homepage">https://github.com/gabytz777/vcraft</url>
+  <url type="bugtracker">https://github.com/gabytz777/vcraft/issues</url>
+  <developer_name>gabytz777</developer_name>
+  <provides>
+    <binary>vcraft</binary>
+  </provides>
+  <releases>
+    <release version="${VERSION}" date="${DATE}"/>
+  </releases>
+</component>
 EOF
 
 echo "==> [3/4] rendering icon"
@@ -76,6 +125,12 @@ out = chunk(out, b'IDAT', zlib.compress(raw, 9))
 out = chunk(out, b'IEND', b'')
 open(sys.argv[1], 'wb').write(out)
 PY
+
+# Icon in the places lookups expect: the top level and .DirIcon for the
+# AppImage itself, and the hicolor theme for desktop integration.
+mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+cp "$APPDIR/vcraft.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/"
+cp "$APPDIR/vcraft.png" "$APPDIR/.DirIcon"
 
 echo "==> [4/4] packaging"
 mkdir -p "$DIST"

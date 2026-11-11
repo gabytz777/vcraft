@@ -5,29 +5,47 @@ on:
     branches: [main]
   pull_request:
 
-# The game targets Arch/CachyOS (see the README disclaimer), so the build and
-# the self-test run in an Arch container. The headless self-test renders with
-# Mesa's software rasteriser, so no GPU is required.
+# The game is developed on Arch/CachyOS (see the README disclaimer), so one
+# leg builds and self-tests in an Arch container. The AppImage that ships in
+# releases is built on the oldest still-supported Ubuntu LTS instead (see
+# release.yml for why), so a second leg runs the same gates on that baseline:
+# a binary only runs where the host C library is as new as the build host's,
+# and the AppImage is the artifact users actually download. The headless
+# self-test renders with Mesa's software rasteriser, so no GPU is required.
 jobs:
   build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: arch
+            image: archlinux:base-devel
+          - name: ubuntu-22.04
+            image: ubuntu:22.04
     runs-on: ubuntu-latest
-    container:
-      image: archlinux:base-devel
+    container: ${{ matrix.image }}
     steps:
-      - name: Install dependencies
+      - name: Install dependencies (Arch)
+        if: matrix.name == 'arch'
         run: |
           pacman -Syu --noconfirm --needed \
             git curl python sdl2 mesa libglvnd zlib
 
+      - name: Install dependencies (Ubuntu)
+        if: matrix.name == 'ubuntu-22.04'
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential git curl python3 ca-certificates \
+            libsdl2-dev libegl-dev libgl-dev zlib1g-dev \
+            libegl-mesa0 libgl1-mesa-dri
+
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install V 0.5.2
-        run: |
-          git clone --depth 1 --branch 0.5.2 https://github.com/vlang/v /opt/v
-          make -C /opt/v
-          ln -sf /opt/v/v /usr/local/bin/v
-          v version
+      - name: Install V
+        uses: ./.github/actions/setup-v
 
       - name: Build
         run: ./build.sh

@@ -1011,7 +1011,9 @@ pub fn buttons() u64 {
 	return u64(g_mouse_btns)
 }
 
-// Rising edge of a mouse button this frame (left=0, middle=1, right=2).
+// Rising edge of a mouse button this frame. The index is our own shifted
+// numbering - left=1, middle=2, right=3 - not SDL's, because pump() shifts
+// SDL's mask left by one. Passing 0 would test a bit nothing ever sets.
 pub fn button_pressed(i int) bool {
 	if i < 0 || i >= 32 {
 		return false
@@ -1026,6 +1028,14 @@ pub fn mouse_x() int {
 
 pub fn mouse_y() int {
 	return int(g_mouse_y)
+}
+
+// Place the cursor at an absolute window position. pump() overwrites this
+// from the real device every frame, so the self-test uses it only headless,
+// where there is no device to read.
+pub fn set_mouse_at(x int, y int) {
+	g_mouse_x = i32(x)
+	g_mouse_y = i32(y)
 }
 
 // Free the cursor for the pause menu, and re-grab it for mouse-look.
