@@ -7,17 +7,26 @@ description: Build the V compiler this project needs, at a pinned commit
 # supported"). The development machine runs a post-0.5.2 master build, so
 # CI has to match that.
 #
-# Why the commit is pinned rather than the 0.5.2 tag: `make` clones the tip
-# of vlang/vc to bootstrap itself, and vc has since moved past what the
-# 0.5.2 tag's own vlib can parse, so the tag fails to build with
+# Why the commits are pinned rather than the 0.5.2 tag: `make` bootstraps
+# through vlang/vc, V's compiler translated to C, and clones the TIP of
+# that repository by default. vc moves daily, and only the vc of the same
+# era can parse a given vlib: a month after pinning, the then-current tip
+# stopped accepting this V commit's own sources with
 #
-#   vlib/math/bits/bits.v:621: error: the condition of an `if` cannot
-#   start with a parenthesized `if` expression
+#   vlib/v/types/checker.v:17282: error: cannot use `&map[string]int` as
+#   `&map[string]i64` in argument 4 to ...
 #
-# A master commit is self-consistent (its vc matches its vlib) and is the
-# only combination verified to build this project. Pinning the exact commit
-# keeps that guarantee from decaying as master moves on; bump it
-# deliberately, after checking a local build still passes.
+# So BOTH commits are pinned: the V commit, and the vc commit that was
+# current when it was verified (the compiler pair that CI built with on
+# 2026-10-10). `make local=1` makes `make` use the checked-out vc as-is
+# instead of pulling its tip again (it also skips fetching the bundled
+# tcc, which is only a build accelerator; the system cc builds everything
+# fine).
+#
+# Bump the pair deliberately, after checking a local build still passes:
+# the vc commit to move to is the newest one older than the V commit, from
+# https://github.com/vlang/vc/commits (its messages name the V commit it
+# was generated from).
 runs:
   using: composite
   steps:
@@ -25,8 +34,17 @@ runs:
       shell: bash
       run: |
         git clone https://github.com/vlang/v /opt/v
-        cd /opt/v
-        git checkout 03e12f368ad5061756d523891e12cd759053f486
+        git -C /opt/v checkout 03e12f368ad5061756d523891e12cd759053f486
+
+    - name: Pin the bootstrap compiler (vc)
+      shell: bash
+      run: |
+        # vc stores a ~10MB C snapshot of V in every commit, so a full clone
+        # is gigabytes; fetch only the pinned commit instead.
+        git init /opt/v/vc
+        git -C /opt/v/vc remote add origin https://github.com/vlang/vc
+        git -C /opt/v/vc fetch --depth 1 origin 98961dd97f8f81e4679266919bc1d6e14b041975
+        git -C /opt/v/vc checkout FETCH_HEAD
 
     # V's post-build step registers a GitHub problem matcher pointing at
     # /opt/v, outside the workspace. The runner rejects an add-matcher path
@@ -36,7 +54,7 @@ runs:
     # self-test gate instead.
     - name: Build V
       shell: bash
-      run: env -u GITHUB_JOB make -C /opt/v
+      run: env -u GITHUB_JOB make -C /opt/v local=1
 
     - name: Put V on PATH
       shell: bash
